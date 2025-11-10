@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node test-api.js:*)",
+      "Bash(node test-api-detailed.js:*)",
+      "Bash(node test-find-working-endpoints.js:*)",
+      "Bash(node test-kalshi-deep.js:*)",
+      "Bash(node test-final-verification.js:*)",
+      "Bash(node test-polymarket-exploration.js:*)",
+      "Bash(node test-polymarket-pagination.js:*)",
+      "Bash(node test-polymarket-all-pages.js:*)",
+      "Bash(node:*)",
+      "Bash(npx tsc --noEmit)",
+      "Bash(npx tsc:*)",
+      "Bash(git init:*)",
+      "Bash(git add:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

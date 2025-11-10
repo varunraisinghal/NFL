@@ -1,0 +1,348 @@
+Designing an iPhone Arbitrage Betting App for NFL Markets (Kalshi & Polymarket)
+Project Overview
+
+This app will identify sports betting arbitrage opportunities between Polymarket and Kalshi for NFL yes/no markets. Both Polymarket (a crypto prediction market) and Kalshi (a US-regulated exchange) offer binary contracts on NFL outcomes
+sigma.world
+. An arbitrage occurs when the combined cost of betting both sides of the same outcome (one platform’s Yes and the other’s No) is less than $1, guaranteeing a risk-free profit. The app will continuously fetch live odds from both platforms’ public APIs, match equivalent NFL markets, and alert users when a sure-win arbitrage exists. It will also calculate exactly how much to stake on each platform to lock in the profit. Users can customize settings like minimum profit threshold for alerts and preferred stake strategy (equal-payout arbitrage vs. other strategies).
+
+Key Features at a Glance:
+
+Live Odds Integration: Real-time NFL market odds from Polymarket & Kalshi via public APIs (no manual input required)
+docs.polymarket.com
+docs.kalshi.com
+.
+
+Automated Arb Detection: Algorithmically detect when odds diverge enough to guarantee profit (e.g. Polymarket Yes price + Kalshi No price < $1).
+
+Stake Calculation: For each arbitrage, compute the exact dollar stake to wager on each platform for a risk-free payoff (ensuring equal payout on both outcomes).
+
+User Notifications: Mobile alerts or in-app highlights when an arbitrage above the user’s chosen profit % threshold appears.
+
+Quick Access Links: One-tap links to open the corresponding market in the Polymarket and Kalshi apps/web, so users can place bets quickly.
+
+Custom Settings: Options to adjust refresh frequency, profit threshold, and select between “Risk-Free” mode vs. “Kelly Criterion” mode for stake sizing (explained below).
+
+Data Source Integration (APIs for Odds)
+
+Polymarket API: Polymarket provides an open Gamma API for market data
+docs.polymarket.com
+. No API key or authentication is required for public market queries
+docs.polymarket.com
+. We will use the REST endpoints to retrieve NFL-related markets and odds:
+
+Sports Metadata: First, call GET https://gamma-api.polymarket.com/sports to get the list of sports and their identifiers
+docs.polymarket.com
+docs.polymarket.com
+. The response includes entries for each sport (e.g., NFL) with associated tag IDs or series IDs used for filtering
+docs.polymarket.com
+docs.polymarket.com
+. For example, the NFL entry will provide a tag or series identifier that corresponds to all NFL markets on Polymarket.
+
+NFL Markets Query: Using the above identifier, query the NFL markets. For instance, if the sport metadata for NFL provides a tag ID, we can call GET /markets?tag_id=<NFL_TAG>&status=open on the Gamma API to fetch all open NFL markets. (The Gamma API supports filtering by tag or category for sports
+docs.polymarket.com
+.) Each market object returned will include details like the event title (teams playing), market slug, and latest price for Yes and No outcomes. In Polymarket’s binary markets, the price represents the cost (in USDC) to buy a share that pays $1 if the outcome resolves to “Yes”. (The “No” price is effectively 1 - Yes_price ignoring fees, since Yes and No are complements in a binary market.)
+
+Example: A Polymarket market might be “Will Team A beat Team B on Date?” with a Yes price of 0.45 (45¢). This means a No share would cost ~0.55 by complement. The API likely returns something like: { ..., "outcomes": {"Yes": 0.45, "No": 0.55}, ... } (or a single price if they list only Yes and infer No).
+
+Polymarket’s rate limits are very generous for reading data. The Gamma API allows up to 125 market requests per 10 seconds
+docs.polymarket.com
+, so our app can safely poll the latest prices every few seconds without hitting limits. We will likely set a default refresh interval (say 15–30 seconds) to balance timeliness with battery/network usage, but technically the API can handle even sub-10-second updates if needed
+docs.polymarket.com
+.
+
+Kalshi API: Kalshi also offers public endpoints for market data that do not require an API key or login for read-only access
+docs.kalshi.com
+. We will use Kalshi’s Trade API v2 (base URL https://api.elections.kalshi.com/trade-api/v2) to get equivalent NFL market data:
+
+Market Listing: We can retrieve all open markets, or filter by event series/category. Kalshi organizes markets by Series -> Event -> Market (for sports, a series might correspond to “NFL Week X” or similar, and each game could be an event with a yes/no market for the winner)
+augustwarshauer.com
+. The API offers endpoints like GET /markets?status=open and allows query parameters like series_ticker or filters to narrow down results
+docs.kalshi.com
+. If Kalshi provides a specific series code for NFL markets, we will use that for efficiency. Otherwise, we can fetch all open markets and filter client-side by checking each market’s category or title for NFL teams. (The API returns metadata for each market, including its event title and category
+docs.kalshi.com
+. Likely the category will be “Sports” and the titles contain team names for NFL games.)
+
+Extracting NFL Markets: For example, Kalshi might list an event as “Team A vs Team B (Week N)” with a market for the winner. We’ll filter those out by looking for known NFL team names/abbreviations in the titles or by an event_ticker pattern. We can also leverage Polymarket’s team list to cross-match team names. Another approach is using Kalshi’s web endpoint for Football (e.g., their site has a Football category page
+kalshi.com
+) to infer that NFL markets have a certain prefix or series code.
+
+Market Data: Each market from Kalshi’s API provides a yes_price (in cents). For instance, yes_price: 60 means Yes shares cost $0.60 (60¢). Kalshi’s pricing is complementary as well: if Yes = 60¢, then No = 40¢ (since on Kalshi yes_price = 100 - no_price by definition
+augustwarshauer.com
+). The API might not explicitly give the no_price in the market listing, but we can compute no_price = 1 - yes_price (or derive it from the data if available).
+
+Kalshi’s API has rate limits, though specific numbers are not publicly stated for the free tier. They mention that requests are capped and recommend strategies like caching and backoff if limits are hit
+zuplo.com
+. In practice, moderate polling (once every ~30 seconds) for a handful of markets is unlikely to hit limits. As usage scales, Kalshi offers higher tiers with larger rate allocations
+zuplo.com
+. For our initial implementation, we’ll use periodic REST polling (no auth needed) which is simpler; if needed later, we can upgrade to a WebSocket feed for real-time updates (that would require user authentication and handling token refresh
+zuplo.com
+, since Kalshi’s WebSocket is authenticated).
+
+Handling API Keys: For purely reading market data, no API keys are required on either platform’s public endpoints
+docs.polymarket.com
+docs.kalshi.com
+. This keeps setup simple – users won’t need to provide any credentials just to see odds. In the future, if the app expands to placing bets or using private account info, we would integrate secure authentication: for Kalshi, generating API keys via their developer portal and storing them safely (e.g. in iOS Keychain) would be necessary; for Polymarket, connecting a crypto wallet or using their builder keys might be required for trading. However, this app version will refrain from automated wagering (both to comply with platform terms and because auto-betting crosses into regulatory issues). We focus on identification and calculation, with the user manually executing the bets via provided links.
+
+Refresh Frequency and Rate Limit Considerations
+
+Given the above limits, we can confidently refresh NFL odds data at least every 30 seconds without issues. Polymarket allows very high request rates (up to 750 requests/10s across endpoints)
+docs.polymarket.com
+, and even its specific markets endpoint can handle ~12 requests/second
+docs.polymarket.com
+. Kalshi’s free tier likely allows dozens of calls per minute (exact figures aren’t published publicly). To be safe, our default will be to poll both APIs every 15–30 seconds. This should capture arbitrage opportunities close to real-time while staying well within safe limits. We’ll also implement basic throttling/batching: for example, fetch all relevant Polymarket markets in one call (the API supports bulk queries with filters) instead of one call per market, and similarly batch Kalshi data. This efficient design ensures we minimize calls and avoid hitting any caps inadvertently
+zuplo.com
+.
+
+Additionally, the user can have a manual refresh pull-to-refresh in the UI for instant updates. If a more rapid update is needed (e.g. during game time when odds swing quickly), we could consider enabling a temporary faster polling or using Kalshi’s WebSocket (which would push live price changes). But for now, a <30s interval offers a good balance between timeliness and resource use on a mobile device.
+
+Matching Equivalent NFL Markets on Polymarket and Kalshi
+
+A core challenge is mapping the same NFL event between the two platforms, since they may use different naming conventions. The app will include a market-matching layer that pairs a Polymarket market with its corresponding Kalshi market for the same game or outcome. Here’s our approach:
+
+Team & Event Identification: We will utilize team identifiers and names. Polymarket’s /teams endpoint provides a list of team names, abbreviations, and league info
+docs.polymarket.com
+docs.polymarket.com
+. We can filter that list to NFL teams (where league = "NFL" in the team object). This gives us standardized names/abbreviations (e.g., “Kansas City Chiefs” / “KC”). When we retrieve market data:
+
+On Polymarket, each NFL market’s title likely contains the two team names (or nicknames) and possibly the game date or week. Polymarket might also tag markets with team IDs or a series for the season/week, given the presence of a series field in sports metadata (for example, a series might represent “2025 NFL Week 9”)
+docs.polymarket.com
+docs.polymarket.com
+. We will parse the market title and/or use the associated tags to identify which teams are involved.
+
+On Kalshi, the event title similarly contains both team names or abbreviations. We’ll look for those team names/abbreviations in Kalshi’s market data. Kalshi might use official team names or city names in their event titles (e.g., “Buffalo Bills vs New York Jets”).
+
+Pairing Logic: Once we have the list of Polymarket NFL markets and Kalshi NFL markets, we will compare them to find matches:
+
+By Teams: For each Polymarket market, extract the two team names. Then search the Kalshi markets for those same two team names (order-insensitive, since one platform might list “TeamA vs TeamB” vs the other “TeamB at TeamA”). We may use a normalized representation (like team abbreviations) to ensure matching even if naming differs (e.g., “Los Angeles Chargers” vs “LA Chargers”). The Polymarket teams data can provide a mapping from full name to common abbreviations, which should align with Kalshi’s naming.
+
+By Date/Week: If multiple matchups of the same teams exist (unlikely on the same date), we can further verify by date. Polymarket’s event might include the date (e.g., “on Nov 12, 2025”). Kalshi might inherently separate events by week or date. Ensuring the timing aligns (e.g., matching the NFL schedule for that week) will confirm the pairing. In practice, during a given week, each pair of teams plays only once, so team names are usually enough.
+
+Example: Polymarket market: “Will the Dallas Cowboys beat the Philadelphia Eagles in Week 10?” – Yes price 0.52. Kalshi market: “Cowboys vs Eagles Week 10” – yes_price 54 (¢). The app would recognize both involve Cowboys and Eagles, likely Week 10, and treat them as the same event.
+
+Mismatch Handling: If a market exists on one platform but not the other, it can’t form an arbitrage pair and will be ignored. (For instance, if Polymarket has a market on a player award or a spread that Kalshi doesn’t, we skip it.) Initially we focus on moneyline/winner markets (simple Yes/No on which team wins) since those are common to both. The UI could show unmatched markets greyed out or not at all.
+
+Multi-Outcome Markets: For now, we restrict to binary outcomes (Yes/No). In the future, if multi-outcome markets (like “Who will win the Super Bowl?” with many teams) are considered for arbitrage, the logic is more complex (requires combining bets across more than two outcomes). The app’s design is flexible to extend to that, but NFL game winners give us straightforward two-outcome comparisons to start.
+
+Arbitrage Detection Algorithm
+
+Once markets are matched, the app computes whether an arbitrage opportunity exists and its profit margin. For each matched pair of markets (same game on Polymarket and Kalshi):
+
+Fetch Current Prices: We have:
+
+Polymarket’s Yes price (Pᵧₚ) and implicitly its No price (Pₙₚ = 1 - Pᵧₚ, ignoring any fees).
+
+Kalshi’s Yes price (Pᵧₖ) and No price (Pₙₖ = 1 - Pᵧₖ, since yes_price + no_price = 1 in dollars
+augustwarshauer.com
+).
+These prices are expressed in dollars (or fraction of $1). For example, Pᵧₚ = 0.45 means 45¢, Pᵧₖ = 0.50 means 50¢, etc. We’ll convert any values as needed (Kalshi’s API returns cents as integers, which we divide by 100 to get 0.xx format).
+
+Check Both Combinations: There are two ways to pair bets:
+
+Option A: Buy Yes on Polymarket and No on Kalshi. This covers both outcomes: if the team wins, the Polymarket Yes bet pays out $1; if the team loses, the Kalshi No bet pays $1.
+
+Total Cost = Pᵧₚ (paid to buy one Yes share on Polymarket) + Pₙₖ (paid to buy one No share on Kalshi).
+
+Option B: Buy No on Polymarket and Yes on Kalshi. Here, if the team wins, Kalshi Yes pays $1; if the team loses, Polymarket No pays $1.
+
+Total Cost = Pₙₚ + Pᵧₖ.
+
+Each option essentially forms an all-outcome hedge (covering both possible outcomes of the game).
+
+Arbitrage Condition: If either option’s total cost is less than $1, that option represents a risk-free arbitrage. We pick the cheaper of the two options (only one will be < $1 in normal scenarios):
+
+Arbitrage exists if min(Pᵧₚ + Pₙₖ, Pₙₚ + Pᵧₖ) < 1.00.
+
+Typically, one platform will have better (lower) odds on Yes and the other better on No. That combination will yield the inequity. For example, if Polymarket’s Yes is cheap while Kalshi’s No is cheap, then Pᵧₚ + Pₙₖ < 1 might hold. Or vice versa.
+
+Calculate Profit Margin: If an arbitrage is found, the profit margin = (1 - total_cost) * 100%. This is the percentage gain on the total money staked. For instance, if buying the two bets costs $0.97 to guarantee $1 payout, the profit margin is 3%. The app will display this percentage for each opportunity. Higher percentages are more attractive (and often rarer).
+
+Account for Fees/Slippage: Note: In practice, we might slightly adjust for trading fees:
+
+Polymarket historically charged a small fee on winnings (e.g. 2-3%). Kalshi charges a commission per contract (capped at a few cents). These fees could shave off some profit, especially if the margin is small. To be safe, the app could include a fee cushion – e.g., require margin > 1-2% before alerting, or let the user set the threshold accordingly. We will note in the documentation that extremely thin arbs (<1%) might be nullified by fees or price movements, so users might set a threshold like 2% to filter those out.
+
+We also use latest available prices (likely the midpoint or last traded price). If there’s a bid-ask spread, the true cost to execute might be slightly higher (you buy on the ask side of one market and sell on the bid side of the other). For now, we assume sufficient liquidity that the mid price is achievable. In future, a more advanced version could incorporate order book data (both APIs offer order books
+docs.kalshi.com
+docs.polymarket.com
+) to ensure the required stake can be filled at that price.
+
+The app will loop through all matched markets and apply this calculation. Any market pair with a positive risk-free margin is flagged as an Arb Opportunity.
+
+Stake Sizing and Strategies
+
+For each arbitrage opportunity, the app computes how much to bet on each platform to exploit it. By default, we use the equal payout strategy – this means structuring the stakes such that no matter which team wins, the payout is the same, locking in the profit.
+
+Equal Payout (Risk-Free) Strategy:
+In this strategy, you invest proportional to the inverse of each outcome’s price. The simplest way to do this is to consider a $1 target payout (per arbitrage cycle):
+
+If we use Option A (Yes on Polymarket, No on Kalshi) as the arb: To guarantee $1 outcome:
+
+Buy 1 share of Yes on Polymarket, which costs Pᵧₚ dollars and will return $1 if yes wins.
+
+Buy 1 share of No on Kalshi, costing Pₙₖ dollars and returning $1 if no wins.
+
+Total spend = Pᵧₚ + Pₙₖ (which is < $1 in an arb scenario). Regardless of outcome, one of those shares pays $1, so you get $1 back. The profit is $1 - (Pᵧₚ + Pₙₖ).
+
+Similarly, if Option B is the chosen arb (No on Polymarket, Yes on Kalshi), you’d buy 1 No share on Polymarket and 1 Yes share on Kalshi, cost = Pₙₚ + Pᵧₖ, payout $1 guaranteed.
+
+The app will display the required stakes for each side. For example: “Bet $0.45 on Polymarket (Yes for Team A) and $0.40 on Kalshi (No for Team A) to earn $1.00 no matter what. Total cost $0.85 ⇒ +17.6% profit.” Users can scale this up – if they want a $100 payout, they’d bet $45 and $40 respectively (100x the $1 stakes).
+
+This strategy is true arbitrage – zero risk. The app will encourage this as the default mode for users who just want guaranteed profit.
+
+Kelly Criterion (Speculative) Strategy:
+We also provide an alternative for advanced users: they might believe one platform’s odds are wrong (e.g., one team is undervalued). In that case, they might not want to fully hedge away the risk, but rather weight their bets to capitalize on that belief. The Kelly Criterion is a formula used to maximize long-term growth when you have an edge in probability. In our context, if a user thinks Polymarket’s odds imply Team A has a 40% chance but they estimate it’s actually 50%, they might use Kelly to bet more on Team A’s side. The app can present this option:
+
+Essentially, the user would input their own estimated probability for the outcome; the app then calculates the optimal fraction of bankroll to bet on each side. This typically results in an unequal stake, favoring the side with the perceived edge (instead of equalizing payouts).
+
+Example: Suppose Polymarket Yes at 0.40 and Kalshi No at 0.60 create an arb (total 1.00 exactly, zero profit). If the user believes the true chance of Yes is 50%, Kelly criterion might advise betting more on Yes (since it’s undervalued at 40%) and only partially hedge with No. This isn’t a pure arbitrage (it introduces risk but higher expected value).
+
+The app will explain the difference clearly: Kelly mode is for users who want to speculate on one outcome while still using the other bet to cushion losses. It’s essentially a differential betting strategy, not a sure-thing profit.
+
+We will allow the user to toggle between “Sure Profit” mode and “Kelly” mode. When Kelly is chosen, the UI might allow input of the user’s probability estimate for each bet, and then suggest stakes accordingly. (If the user doesn’t have a specific estimate, they should stick to equal payout mode.)
+
+User Choice in Settings: The Settings screen will have an option to select Stake Strategy: either “Equal Payout (No-Risk)” or “Custom (Kelly)”. By default, it’s Equal Payout (since that guarantees profit whenever an arb exists). If Kelly mode is chosen, the app might default to using the midpoint odds as implied probabilities but let the user adjust them for each arb before calculating stakes.
+
+In summary, the Equal Payout strategy is straightforward: it’s what yields the listed arbitrage profit. The Kelly strategy is an optional advanced tool and will be clearly labeled as involving risk. Most casual users will likely use the default arbitrage mode to lock in profits.
+
+User Interface & Workflow
+
+The app will be designed for simplicity and speed, given that arbitrage opportunities can be time-sensitive. Key UI components:
+
+Dashboard (Home Screen): This will list current arbitrage opportunities. Each entry will show:
+
+Match/Game – e.g. “Patriots vs Dolphins – Week 5” (including date/time if needed).
+
+Odds Snapshot – e.g. “Polymarket Yes 47¢ vs Kalshi No 50¢” (the combination being considered).
+
+Profit Margin – e.g. “+3%” highlighted if positive. We might color-code by size of profit (green for strong arbs).
+
+Recommended Stakes – e.g. “Bet $0.47 on Yes @ Polymarket and $0.50 on No @ Kalshi to win $1.00”. If the user has set a custom payout target (say $100), we could multiply those values accordingly (e.g. “Bet $47 on Polymarket, $50 on Kalshi to win $100”).
+
+Action Buttons: Two small buttons, “Open in Polymarket” and “Open in Kalshi”. Tapping these will deep-link or open the browser to the specific market page on each platform so the user can quickly place the bet. For instance, Polymarket markets have URLs like polymarket.com/market/<market-slug> which we can get from the API. Kalshi markets can be opened at kalshi.com/markets/<market-ticker> or via their app if installed. (We will use iOS’s SafariViewController or deep link mechanism to open these safely.)
+
+Details Screen: If the user taps on an opportunity, we can show a detailed view:
+
+A chart or indication of price history (optional, if we store historical odds – could be a future feature).
+
+Both platforms’ order book highlights (if the user wants to see depth – again optional).
+
+An explanation of how the arbitrage is achieved (good for user education): e.g. “Polymarket implies Team A has a 47% chance, Kalshi implies Team A has 50% chance. By betting opposite sides, you lock in profit due to the discrepancy.”
+
+A slider to adjust stake amounts (especially if they want more than the default $1 payout). Adjusting one slider could automatically adjust the other stake to maintain the chosen strategy (equal or Kelly).
+
+If in Kelly mode, this screen would also allow input of the user’s perceived probabilities and show revised suggested stakes and projected outcomes.
+
+Settings Screen:
+
+Profit Threshold: A slider or input (e.g. 0% up to maybe 10%) for the minimum arbitrage percentage to display/alert. For example, if set to 2%, the app will ignore opportunities with <2% profit. This helps filter out potential false or tiny arbs. Users in high-fee environments might set this higher.
+
+Stake Strategy: As discussed, a toggle between Equal Payout vs Kelly/Custom. We will include info text here explaining each, so users understand what each means.
+
+Refresh Rate: We might allow power users to choose a faster refresh (e.g. 10s) or slower (60s) depending on their needs and data considerations. Default 30s. We’ll mention that extremely fast polling could be unnecessary due to near real-time markets and possible rate limits.
+
+Notifications: An option to enable push notifications for new arbitrage opportunities above the threshold. If enabled, the app will send a notification like “Arbitrage found: TeamA vs TeamB for 3.5% profit!” even if the app is in background. (This would require setting up background fetch or a lightweight server component to push alerts, but it’s feasible.)
+
+API Key Management (Future): If in later versions we allow users to connect their Kalshi account for auto-betting or use private endpoints, we’d have a section here to input API keys. For now, this is not needed. We will clarify in-app that no login is required to use the arbitrage finder.
+
+Intuitive Design: The overall look will be clean and focused. Given that Kalshi and Polymarket are relatively data-heavy, we’ll simplify the presentation to what matters for arbitrage: match name, odds, and profit. The use of common team logos or icons could help quick identification (we could fetch team logos via Polymarket’s sports metadata which includes image URLs for sports or teams
+docs.polymarket.com
+docs.polymarket.com
+). For example, show team icons next to the match name.
+
+Example Entry in App:
+“Giants vs Cowboys – Polymarket Yes 0.42, Kalshi No 0.59 – +1% profit.
+Bet $0.42 on Giants (Yes @ Polymarket) and $0.59 on Cowboys (Yes @ Kalshi) to lock in $1.00.”
+[Open Polymarket] [Open Kalshi]
+
+This tells the user exactly what to do. If they tap the Polymarket button, it opens the Polymarket app/website to the Giants vs Cowboys market with a pre-filled interface to buy Yes (if possible). Similarly, the Kalshi button opens the corresponding market (which would be the Cowboys winning market, but since buying No on one is equivalent to Yes on the other team’s victory, opening the Kalshi link might just be the same market where they would buy No instead of Yes).
+
+Development Approach and Considerations
+
+To implement this iPhone app efficiently, we can use a cross-platform framework like React Native (which was prototyped in earlier steps) or go fully native with SwiftUI. A React Native app using Expo could quickly leverage JavaScript to call the REST APIs and handle real-time updates. Since performance is not a big issue (calls every few seconds and simple calculations), either approach works. For a polished iOS experience, a Swift/SwiftUI app might be ideal:
+
+Networking: We’ll use URLSession (Swift) or fetch/Axios (React Native) to call the APIs. The calls are straightforward GET requests. We’ll parse JSON responses into model objects (e.g., Market struct with fields like teams, yesPrice, noPrice, platform).
+
+Data Model: We will create a unified data model for an arbitrage opportunity, e.g. an ArbitrageOpportunity object containing:
+
+Teams / Event info (e.g., “DAL vs PHI Week10”).
+
+Polymarket yes price, Kalshi yes price (and derive no prices).
+
+Calculated profit %, and indicators of which combination yields the arbitrage (maybe a flag like arbMode: "PM-yes & Kalshi-no" or the reverse).
+
+Stakes for $1 payout (Polymarket stake, Kalshi stake).
+
+URLs for the market on each platform (for deep linking).
+
+State Management: The app will periodically refresh the list of opportunities. We’ll manage this with a timer (DispatchTimer in Swift or setInterval in JS) that triggers API fetches. On each fetch:
+
+Get Polymarket NFL markets.
+
+Get Kalshi NFL markets.
+
+Match them and compute arbitrage list.
+
+Update the UI list (only showing those above threshold setting).
+If using SwiftUI, this can be done in an ObservableObject that publishes changes to the list of opportunities.
+
+Error Handling: We’ll handle cases like network failures or API downtime. For example, if an API call fails, the app might show a brief message or keep the last known odds (with a timestamp). We will also ensure that if one platform’s data is slightly delayed, we avoid false signals. (Better to fetch both nearly simultaneously and compute based on the same “cycle” of data.)
+
+Security: Since we are not using user credentials (just public data), there are no major security concerns with API keys here. The calls can be made directly from the app. One consideration: if Polymarket’s API endpoint is on HTTPS (it is) and Kalshi’s is HTTPS, we’re fine. We should enable App Transport Security exceptions if needed (likely not needed if HTTPS).
+
+API Limits: As noted, we are under the limits. But if the user sets a very fast refresh, we may implement a safeguard (e.g., do not allow faster than, say, 5 seconds interval in settings). Also, to reduce load, we might not fetch all markets every time. Instead, we could fetch once and then only poll for price updates. However, since neither API yet provides a simple “only prices” endpoint without all market data, we will initially just re-fetch. The data size is not huge (dozens of markets in JSON) and well within modern phones’ capabilities.
+
+Testing and Calibration
+
+We will test the app during live NFL game weeks to see real examples of arbitrage. Often, right before games or during games (if in-play markets exist), prices move and create opportunities. We’ll verify that the app catches known arbitrages. We’ll also use historical data to simulate scenarios.
+
+One important test is to ensure correct market matching: we might create a unit test with known pairs (e.g., feed in a Polymarket market and a Kalshi market for the same game, ensure the algorithm pairs them). We’ll also test cases where names might not match perfectly (e.g., “Los Angeles” vs “LA”) – our use of abbreviations and team lists should handle that.
+
+Furthermore, we’ll verify that the profit calculation is correct to at least two decimal places and that the stake suggestions indeed yield equal payouts. For instance, we’ll simulate a scenario: Polymarket Yes 0.40 vs Kalshi No 0.55 -> the app suggests $0.40 on Polymarket, $0.55 on Kalshi for $1 payout. If Team wins (yes), Polymarket returns $1 (profit $0.60, Kalshi loses $0.55, net $0.05 profit which matches 5% of $0.95 total stake). If Team loses, Kalshi returns $1, Polymarket loses $0.40, net $0.05 – consistent. We’ll do such dry runs for several combinations (including some where no arb exists, to ensure we don’t falsely flag anything when sum >= 1).
+
+Future Expansion Plans
+
+While this app initially focuses on NFL yes/no markets, its framework can extend to other domains:
+
+More Sports & Markets: We can add NBA, MLB, etc., as long as both Polymarket and Kalshi (or any other paired exchange) offer those markets. The sports metadata from Polymarket can list all available sports (e.g., NBA, NCAA, etc.)
+docs.polymarket.com
+. We could allow the user to select which sports to monitor. Each sport would have its own tag ID for Polymarket and category for Kalshi. For multi-sport, we’d incorporate that into matching logic (e.g., ensure we only match within the same sport).
+
+Additional Platforms: The user originally mentioned Bovada as well. Bovada is a traditional sportsbook (with odds in moneyline/decimal format). The app could include Bovada by scraping or using an odds API. Arbitrage between a sportsbook and an exchange is also possible. The architecture would then have to convert odds formats (moneyline to implied probability). This is a natural extension once the exchange-exchange arbitrage is in place. We’d modularize the code such that adding a new data source (with its API or scraping routine and odds parsing) plugs into the matching and arb calculation engine.
+
+Multi-Outcome Arbitrage: In futures or multi-outcome markets (e.g., “Which team wins the Super Bowl”), arbitrage involves betting on all outcomes such that total spend < 1 and one outcome pays 1. The principle is similar but requires summing across more legs. The app’s calculation module could be generalized to N outcomes. For now, binary markets are handled (N=2). We might later include a feature to detect arbitrage in, say, a championship winner market across different books (where you back multiple teams on different platforms to cover the field).
+
+Real-Time Updates: Move from polling to a WebSocket for Kalshi if needed (Kalshi’s API supports live market updates via WS for instantaneous data
+zuplo.com
+zuplo.com
+). Polymarket being on-chain could even use an on-chain subscription or simply frequent polls (they also have a websocket for trades via their CLOB API). Real-time streaming would make the app even more responsive but adds complexity (authentication and maintaining connections). We will evaluate this once the basic version is stable.
+
+Automated Execution (Caution): If regulations and platform policies ever allow, an “auto-bet” feature could execute the arbitrage for the user. This would require securely storing user credentials/API keys and sending trade orders via the APIs (Kalshi’s API supports placing orders
+zuplo.com
+, and Polymarket being on-chain would require wallet signing). However, this is sensitive and currently likely against terms of service for consumer accounts, so it remains a theoretical future idea. The app as designed keeps the user in control of placing the actual wagers.
+
+Conclusion
+
+We have designed an intuitive iPhone app that leverages public APIs from Polymarket and Kalshi to find risk-free betting opportunities on NFL games. By continuously monitoring both platforms’ odds (within provided rate limits)
+docs.polymarket.com
+zuplo.com
+, matching corresponding markets, and performing simple arithmetic checks, the app can uncover arbitrage chances and guide the user exactly how to profit from them. All of this is done legally and transparently using official data endpoints (no screen-scraping or unauthorized access)
+docs.polymarket.com
+docs.kalshi.com
+. The user benefits from real-time information and decision support, while still manually confirming and placing bets to remain within the platforms’ rules.
+
+This detailed prompt can now be used to kickstart development. By following this blueprint, a developer (or a coding assistant AI) can implement the described functionality step-by-step, resulting in a functional arbitrage calculator app. With the NFL season in full swing, the timing is perfect to help users capitalize on mispriced odds across these innovative prediction markets. Good luck, and happy arbitraging! 🚀
+
+Sources:
+
+Polymarket Developer Documentation – Gamma API Overview & Rate Limits
+docs.polymarket.com
+docs.polymarket.com
+
+Kalshi API Documentation – Unauthenticated Market Data Access & Best Practices
+docs.kalshi.com
+zuplo.com
+
+Warshauer, A. (2024) Kalshi Spread Analysis – (explains yes/no price relationship)
+augustwarshauer.com
+
+SiGMA News (2025) – Polymarket and Kalshi offering NFL markets
+sigma.world
