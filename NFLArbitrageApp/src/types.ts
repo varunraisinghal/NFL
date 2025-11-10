@@ -68,9 +68,10 @@ export interface MatchedMarket {
   matchTitle: string;
 }
 
-// Grouped Kalshi game (two markets for same game)
-export interface KalshiGroupedGame {
+// Grouped game (two markets for same game - works for both Kalshi and Polymarket)
+export interface GroupedGame {
   gameTitle: string;
+  platform: 'Polymarket' | 'Kalshi';
   team1: {
     name: string;
     abbr: string;
@@ -87,6 +88,9 @@ export interface KalshiGroupedGame {
   endDate?: string;
   url: string;
 }
+
+// Legacy type alias for backwards compatibility
+export type KalshiGroupedGame = GroupedGame;
 
 // Navigation types for React Navigation
 export type RootStackParamList = {

@@ -418,21 +418,21 @@ const MainScreen = () => {
                 <View style={styles.platformDetail}>
                   <Text style={styles.platformName}>Polymarket</Text>
                   <Text style={styles.betDetail}>
-                    {opportunity.polymarket.outcome} @ ${opportunity.polymarket.displayPrice.toFixed(3)}
+                    {opportunity.polymarket.outcome} @ ${opportunity.polymarket.displayPrice.toFixed(6)}
                   </Text>
                   <Text style={styles.stakeDetail}>
                     Stake: ${opportunity.polymarket.stake}
                   </Text>
                 </View>
-                
+
                 <View style={styles.vsContainer}>
                   <Text style={styles.vsText}>↔</Text>
                 </View>
-                
+
                 <View style={styles.platformDetail}>
                   <Text style={styles.platformName}>Kalshi</Text>
                   <Text style={styles.betDetail}>
-                    {opportunity.kalshi.outcome} @ ${opportunity.kalshi.displayPrice.toFixed(3)}
+                    {opportunity.kalshi.outcome} @ ${opportunity.kalshi.displayPrice.toFixed(6)}
                   </Text>
                   <Text style={styles.stakeDetail}>
                     Stake: ${opportunity.kalshi.stake}
