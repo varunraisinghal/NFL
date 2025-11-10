@@ -1,5 +1,5 @@
 // src/screens/MainScreen.tsx
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   ScrollView,
   View,
@@ -9,10 +9,12 @@ import {
   RefreshControl,
   ActivityIndicator,
   Alert,
+  Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as Haptics from 'expo-haptics';
+import * as Notifications from 'expo-notifications';
 import { useNavigation } from '@react-navigation/native';
 import { StackNavigationProp } from '@react-navigation/stack';
 
@@ -20,6 +22,17 @@ import { polymarketAPI } from '../services/polymarketAPI';
 import { kalshiAPI } from '../services/kalshiAPI';
 import { MarketData, ArbitrageOpportunity, RootStackParamList } from '../types';
 import { extractTeamsFromTitle } from '../utils/nflTeamMappings';
+
+// Configure notifications
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: true,
+    shouldSetBadge: true,
+    shouldShowBanner: true,
+    shouldShowList: true,
+  }),
+});
 
 type MainScreenNavigationProp = StackNavigationProp<RootStackParamList, 'Main'>;
 
@@ -41,31 +54,100 @@ const MainScreen = () => {
     profitThreshold: 0.01, // Show opportunities above 0.01% (almost all)
     includeFees: false, // Don't deduct fees - show raw arbitrage
     targetPayout: 10000, // Calculate profit on $10k positions
+    notificationsEnabled: true, // Enable notifications
+    notificationThreshold: 1.0, // Notify for opportunities above 1%
   });
-  
+
+  // Track notified opportunities to avoid spam
+  const notifiedOpportunities = useRef<Set<string>>(new Set());
+
+  // Request notification permissions
+  useEffect(() => {
+    (async () => {
+      const { status: existingStatus } = await Notifications.getPermissionsAsync();
+      let finalStatus = existingStatus;
+
+      if (existingStatus !== 'granted') {
+        const { status } = await Notifications.requestPermissionsAsync();
+        finalStatus = status;
+      }
+
+      if (finalStatus !== 'granted') {
+        console.log('⚠️ Notification permissions not granted');
+      }
+    })();
+  }, []);
+
+  // Send notification for new opportunities
+  const sendNotification = useCallback(async (opportunity: ArbitrageOpportunity) => {
+    if (!settings.notificationsEnabled) return;
+    if (opportunity.profitMargin < settings.notificationThreshold) return;
+    if (notifiedOpportunities.current.has(opportunity.id)) return;
+
+    notifiedOpportunities.current.add(opportunity.id);
+
+    await Notifications.scheduleNotificationAsync({
+      content: {
+        title: '💰 Arbitrage Opportunity!',
+        body: `${opportunity.matchTitle}\n+${opportunity.profitMargin.toFixed(2)}% profit ($${opportunity.profitAmount})`,
+        data: { opportunityId: opportunity.id },
+        sound: true,
+      },
+      trigger: null, // Show immediately
+    });
+
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+  }, [settings.notificationsEnabled, settings.notificationThreshold]);
+
   // Fetch all markets
   const fetchAllMarkets = useCallback(async (showLoading = true) => {
     console.log('🔄 Fetching all markets...');
     if (showLoading) setIsLoading(true);
-    
+
     try {
       // Fetch from both platforms in parallel
-      const [polyMarkets, kalshiMarkets] = await Promise.all([
+      // For both platforms, fetch moneylines AND spreads
+      const [polyMoneylines, polySpreads, kalshiMoneylines, kalshiSpreads] = await Promise.all([
         polymarketAPI.fetchAllMarkets(),
+        polymarketAPI.fetchSpreadsForSport({
+          id: 'nfl',
+          name: 'NFL',
+          emoji: '🏈',
+          polymarketSportId: 10,
+          kalshiSeriesTicker: 'KXNFLGAME',
+          teams: [],
+          extractTeams: () => [],
+          isSameGame: () => false,
+          matchingStrategy: 'team-based',
+          season: { start: '09-01', end: '02-15' },
+          active: true,
+        }),
         kalshiAPI.fetchAllMarkets(),
+        kalshiAPI.fetchSpreadsForSport(),
       ]);
-      
-      console.log(`📊 Fetched ${polyMarkets.length} Polymarket and ${kalshiMarkets.length} Kalshi markets`);
-      
+
+      // Combine moneylines and spreads for each platform
+      const polyMarkets = [...polyMoneylines, ...polySpreads];
+      const kalshiMarkets = [...kalshiMoneylines, ...kalshiSpreads];
+
+      console.log(`📊 Fetched ${polyMoneylines.length} Polymarket moneylines, ${polySpreads.length} Polymarket spreads, ${kalshiMoneylines.length} Kalshi moneylines, ${kalshiSpreads.length} Kalshi spreads`);
+
       setPolymarketData(polyMarkets);
       setKalshiData(kalshiMarkets);
       
       // Find arbitrage opportunities
       const opportunities = findArbitrageOpportunities(polyMarkets, kalshiMarkets);
       setArbitrageOpportunities(opportunities);
-      
+
+      // Send notifications for high-value opportunities
+      if (!showLoading) { // Only notify on background refreshes, not initial load
+        for (const opp of opportunities) {
+          await sendNotification(opp);
+        }
+      }
+
       setLastUpdate(new Date());
-      
+
       console.log(`✅ Found ${opportunities.length} arbitrage opportunities`);
       
     } catch (error) {
@@ -75,7 +157,7 @@ const MainScreen = () => {
       setIsLoading(false);
       setIsRefreshing(false);
     }
-  }, []);
+  }, [sendNotification]);
   
   // Find arbitrage opportunities between markets
   const findArbitrageOpportunities = (
@@ -84,15 +166,22 @@ const MainScreen = () => {
   ): ArbitrageOpportunity[] => {
     const opportunities: ArbitrageOpportunity[] = [];
 
-    console.log('🔍 Looking for arbitrage opportunities...');
-    console.log(`   Polymarket: ${polyMarkets.length} moneylines`);
-    console.log(`   Kalshi: ${kalshiMarkets.length} markets (2 per game)`);
+    // Separate moneylines and spreads
+    const polyMoneylines = polyMarkets.filter(m => !m.marketType || m.marketType === 'moneyline');
+    const polySpreads = polyMarkets.filter(m => m.marketType === 'spread');
+    const kalshiMoneylines = kalshiMarkets.filter(m => !m.marketType || m.marketType === 'moneyline');
+    const kalshiSpreads = kalshiMarkets.filter(m => m.marketType === 'spread');
 
+    console.log('🔍 Looking for arbitrage opportunities...');
+    console.log(`   Polymarket: ${polyMoneylines.length} moneylines, ${polySpreads.length} spreads`);
+    console.log(`   Kalshi: ${kalshiMoneylines.length} moneylines, ${kalshiSpreads.length} spreads`);
+
+    // === MONEYLINE ARBITRAGE ===
     // Group Kalshi markets by game (they have 2 markets per game)
     const kalshiGameMap = new Map<string, MarketData[]>();
     let failedExtractions = 0;
 
-    for (const kalshiMarket of kalshiMarkets) {
+    for (const kalshiMarket of kalshiMoneylines) {
       // Extract teams from Kalshi market
       const teams = extractTeamsFromTitle(kalshiMarket.title);
       if (teams.length === 2) {
@@ -116,7 +205,7 @@ const MainScreen = () => {
     console.log(`   Kalshi games identified: ${kalshiGameMap.size}`);
 
     // Match Polymarket moneylines with Kalshi games
-    for (const polyMarket of polyMarkets) {
+    for (const polyMarket of polyMoneylines) {
       // Extract teams from Polymarket title
       const polyTeams = extractTeamsFromTitle(polyMarket.title);
 
@@ -185,6 +274,9 @@ const MainScreen = () => {
             const totalStake = bestCost * targetPayout;
             const profitAmount = (targetPayout - totalStake).toFixed(2);
 
+            const team1Name = polyTeams[0].name;
+            const team2Name = polyTeams[1].name;
+
             const opportunity: ArbitrageOpportunity = {
               id: `${polyMarket.id}-${kalshiTeam1Market.id}-${kalshiTeam2Market.id}`,
               matchTitle: polyMarket.title,
@@ -196,23 +288,23 @@ const MainScreen = () => {
               polymarket: bestOption === 'A' ? {
                 ...polyMarket,
                 stake: (polyMarket.yesPrice * targetPayout).toFixed(2),
-                outcome: 'Yes',
+                outcome: `${team1Name} to win`,
                 displayPrice: polyMarket.yesPrice,
               } : {
                 ...polyMarket,
                 stake: (polyMarket.noPrice * targetPayout).toFixed(2),
-                outcome: 'No',
+                outcome: `${team2Name} to win`,
                 displayPrice: polyMarket.noPrice,
               },
               kalshi: bestOption === 'A' ? {
                 ...kalshiTeam2Market,
                 stake: (kalshiTeam2Market.yesPrice * targetPayout).toFixed(2),
-                outcome: 'Yes',
+                outcome: `${team2Name} to win`,
                 displayPrice: kalshiTeam2Market.yesPrice,
               } : {
                 ...kalshiTeam1Market,
                 stake: (kalshiTeam1Market.yesPrice * targetPayout).toFixed(2),
-                outcome: 'Yes',
+                outcome: `${team1Name} to win`,
                 displayPrice: kalshiTeam1Market.yesPrice,
               },
               totalStake: totalStake.toFixed(2),
@@ -224,6 +316,117 @@ const MainScreen = () => {
             console.log(`💰 Found opportunity: ${opportunity.matchTitle} - ${profitMargin.toFixed(4)}% profit (Option ${bestOption})`);
           }
         }
+      }
+    }
+
+    // === SPREAD ARBITRAGE ===
+    console.log('\n🔍 Looking for spread arbitrage...');
+
+    // Group Kalshi spreads by game-line
+    const kalshiSpreadMap = new Map<string, MarketData>();
+    for (const kalshiSpread of kalshiSpreads) {
+      if (!kalshiSpread.teams || kalshiSpread.teams.length < 2 || !kalshiSpread.line) continue;
+
+      // Create key: "team1-team2-line" (sorted teams)
+      const teams = kalshiSpread.teams.map(t => t.toLowerCase().trim()).sort();
+      const key = `${teams[0]}-${teams[1]}-${kalshiSpread.line}`;
+
+      // Store the favorite's market (team at index 0)
+      if (!kalshiSpreadMap.has(key)) {
+        kalshiSpreadMap.set(key, kalshiSpread);
+      }
+    }
+
+    console.log(`   Kalshi spread lines: ${kalshiSpreadMap.size}`);
+
+    // Match Polymarket spreads with Kalshi spreads
+    for (const polySpread of polySpreads) {
+      if (!polySpread.teams || polySpread.teams.length < 2 || !polySpread.line) continue;
+
+      // Create matching key
+      const polyTeams = polySpread.teams.map(t => t.toLowerCase().trim()).sort();
+      const key = `${polyTeams[0]}-${polyTeams[1]}-${polySpread.line}`;
+
+      const kalshiSpread = kalshiSpreadMap.get(key);
+      if (!kalshiSpread) continue;
+
+      // For spread arbitrage:
+      // Polymarket: Yes = Favorite covers, No = Underdog covers
+      // Kalshi: Yes = Favorite covers, No = Underdog covers
+      //
+      // Option A: Buy favorite on Poly + underdog on Kalshi
+      // = Poly Yes + Kalshi No
+      const costA = polySpread.yesPrice + kalshiSpread.noPrice;
+
+      // Option B: Buy underdog on Poly + favorite on Kalshi
+      // = Poly No + Kalshi Yes
+      const costB = polySpread.noPrice + kalshiSpread.yesPrice;
+
+      let bestOption: 'A' | 'B' | null = null;
+      let bestCost = 1;
+      let profitMargin = 0;
+
+      if (costA < 1) {
+        bestOption = 'A';
+        bestCost = costA;
+        profitMargin = (1 - costA) * 100;
+      }
+
+      if (costB < 1 && (bestOption === null || costB < bestCost)) {
+        bestOption = 'B';
+        bestCost = costB;
+        profitMargin = (1 - costB) * 100;
+      }
+
+      if (settings.includeFees && profitMargin > 0) {
+        profitMargin = Math.max(0, profitMargin - 0.5);
+      }
+
+      if (bestOption && profitMargin >= settings.profitThreshold) {
+        const targetPayout = settings.targetPayout;
+        const totalStake = bestCost * targetPayout;
+        const profitAmount = (targetPayout - totalStake).toFixed(2);
+
+        const favorite = polySpread.teams[0]; // First team is favorite
+        const underdog = polySpread.teams[1];
+
+        const opportunity: ArbitrageOpportunity = {
+          id: `spread-${polySpread.id}-${kalshiSpread.id}`,
+          matchTitle: `${favorite} vs ${underdog} (${polySpread.line})`,
+          teams: [favorite, underdog],
+          profitMargin: profitMargin,
+          profitAmount: profitAmount,
+          totalCost: bestCost,
+          arbOption: bestOption,
+          polymarket: bestOption === 'A' ? {
+            ...polySpread,
+            stake: (polySpread.yesPrice * targetPayout).toFixed(2),
+            outcome: `${favorite} -${polySpread.line}`,
+            displayPrice: polySpread.yesPrice,
+          } : {
+            ...polySpread,
+            stake: (polySpread.noPrice * targetPayout).toFixed(2),
+            outcome: `${underdog} +${polySpread.line}`,
+            displayPrice: polySpread.noPrice,
+          },
+          kalshi: bestOption === 'A' ? {
+            ...kalshiSpread,
+            stake: (kalshiSpread.noPrice * targetPayout).toFixed(2),
+            outcome: `${underdog} +${polySpread.line}`,
+            displayPrice: kalshiSpread.noPrice,
+          } : {
+            ...kalshiSpread,
+            stake: (kalshiSpread.yesPrice * targetPayout).toFixed(2),
+            outcome: `${favorite} -${polySpread.line}`,
+            displayPrice: kalshiSpread.yesPrice,
+          },
+          totalStake: totalStake.toFixed(2),
+          targetPayout: targetPayout,
+          timestamp: new Date().toISOString(),
+        };
+
+        opportunities.push(opportunity);
+        console.log(`💰 Found SPREAD opportunity: ${opportunity.matchTitle} - ${profitMargin.toFixed(4)}% profit (Option ${bestOption})`);
       }
     }
 
@@ -483,6 +686,38 @@ const MainScreen = () => {
               </Text>
             </TouchableOpacity>
           </View>
+
+          <View style={styles.settingRow}>
+            <Text style={styles.settingLabel}>Push Notifications</Text>
+            <TouchableOpacity
+              style={[styles.toggle, settings.notificationsEnabled && styles.toggleActive]}
+              onPress={() => setSettings({...settings, notificationsEnabled: !settings.notificationsEnabled})}
+            >
+              <Text style={styles.toggleText}>
+                {settings.notificationsEnabled ? 'ON' : 'OFF'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+          {settings.notificationsEnabled && (
+            <View style={styles.settingRow}>
+              <Text style={styles.settingLabel}>Notification Threshold</Text>
+              <View style={styles.settingButtons}>
+                {[0.5, 1.0, 2.0, 3.0].map(threshold => (
+                  <TouchableOpacity
+                    key={threshold}
+                    style={[
+                      styles.settingButton,
+                      settings.notificationThreshold === threshold && styles.settingButtonActive
+                    ]}
+                    onPress={() => setSettings({...settings, notificationThreshold: threshold})}
+                  >
+                    <Text style={styles.settingButtonText}>{threshold}%</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+          )}
         </View>
       </ScrollView>
     </SafeAreaView>

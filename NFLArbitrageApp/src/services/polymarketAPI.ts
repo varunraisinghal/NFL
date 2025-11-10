@@ -99,6 +99,74 @@ export class PolymarketAPI {
   }
 
   /**
+   * Fetch spread markets for a specific sport
+   * @param sport - Sport configuration object
+   * @returns Array of spread market data
+   */
+  async fetchSpreadsForSport(sport: SportConfig): Promise<MarketData[]> {
+    log(`🚀 Fetching ${sport.name} spreads from Polymarket...`, null, 'info');
+
+    try {
+      // Get tag ID for this sport
+      const tagId = await this.getTagIdForSport(sport);
+
+      if (!tagId) {
+        log(`No tag ID found for ${sport.name}`, null, 'error');
+        return [];
+      }
+
+      // Fetch spreads for this sport using sports_market_types parameter
+      const url = `${this.gammaEndpoint}?tag_id=${tagId}&sports_market_types=spreads&active=true&closed=false&limit=100`;
+
+      log(`Fetching from: ${url}`, null, 'debug');
+
+      const response = await fetch(url, {
+        headers: {
+          'Accept': 'application/json',
+          'User-Agent': 'ArbitrageApp/1.0',
+        }
+      });
+
+      if (!response.ok) {
+        log(`Failed with status: ${response.status}`, null, 'error');
+        return [];
+      }
+
+      const markets = await response.json();
+
+      // Gamma API returns array directly (not wrapped in {data: []})
+      if (!Array.isArray(markets)) {
+        log('Unexpected response structure from Gamma API', null, 'error');
+        return [];
+      }
+
+      if (markets.length === 0) {
+        log(`No ${sport.name} spread markets found`, null, 'info');
+        return [];
+      }
+
+      const processedMarkets = this.processGammaSpreads(markets, `${sport.name} spreads`, sport);
+
+      log(`✅ Successfully fetched ${processedMarkets.length} ${sport.name} spread markets`, null, 'success');
+
+      if (processedMarkets.length > 0) {
+        log('Sample spreads:', processedMarkets.slice(0, 3).map(m => ({
+          title: m.title,
+          line: m.line,
+          yesPrice: m.yesPrice,
+          noPrice: m.noPrice,
+        })), 'debug');
+      }
+
+      return processedMarkets;
+
+    } catch (error) {
+      log(`Error fetching ${sport.name} spreads: ${error}`, null, 'error');
+      return [];
+    }
+  }
+
+  /**
    * Get Polymarket tag ID for a sport
    * Uses cached mapping to avoid repeated API calls
    */
@@ -244,6 +312,104 @@ export class PolymarketAPI {
     }
 
     log(`✅ Processed ${processedMarkets.length} valid markets from Gamma API`, null, 'success');
+    return processedMarkets;
+  }
+
+  // Process Gamma API spread markets
+  private processGammaSpreads(markets: any[], source: string, sport?: SportConfig): MarketData[] {
+    log(`Processing ${markets.length} spread markets from ${source}...`, null, 'debug');
+
+    const processedMarkets: MarketData[] = [];
+
+    for (const market of markets) {
+      try {
+        // Verify the market has essential data
+        if (!market.question && !market.title) {
+          continue;
+        }
+
+        const title = market.question || market.title || 'Unknown Market';
+
+        // Extract prices from Gamma API structure
+        let yesPrice = 0.5, noPrice = 0.5;
+        let hasPrices = false;
+
+        if (market.outcomePrices && typeof market.outcomePrices === 'string') {
+          try {
+            const parsed = JSON.parse(market.outcomePrices);
+            if (Array.isArray(parsed) && parsed.length >= 2) {
+              yesPrice = parseFloat(parsed[0]) || 0.5;
+              noPrice = parseFloat(parsed[1]) || 0.5;
+              hasPrices = true;
+            }
+          } catch (e) {
+            // If JSON parse fails, try comma split as fallback
+            const prices = market.outcomePrices.split(',').map((p: string) => parseFloat(p.trim()));
+            if (prices.length >= 2 && !isNaN(prices[0]) && !isNaN(prices[1])) {
+              yesPrice = prices[0];
+              noPrice = prices[1];
+              hasPrices = true;
+            }
+          }
+        }
+
+        // Skip markets with no valid prices
+        if (!hasPrices) {
+          continue;
+        }
+
+        // Filter out settled markets (prices exactly 0 or 1)
+        const epsilon = 0.000001;
+        if (Math.abs(yesPrice) < epsilon || Math.abs(yesPrice - 1) < epsilon ||
+            Math.abs(noPrice) < epsilon || Math.abs(noPrice - 1) < epsilon) {
+          continue;
+        }
+
+        // Ensure prices are in 0-1 range
+        if (yesPrice > 1) yesPrice = yesPrice / 100;
+        if (noPrice > 1) noPrice = noPrice / 100;
+
+        // Parse outcomes (team names)
+        let outcomes: string[] = [];
+        if (market.outcomes && typeof market.outcomes === 'string') {
+          try {
+            outcomes = JSON.parse(market.outcomes);
+          } catch (e) {
+            // Ignore parse errors
+          }
+        }
+
+        // Extract line value (stored as positive in API)
+        const line = market.line !== undefined ? Math.abs(parseFloat(market.line)) : 0;
+
+        processedMarkets.push({
+          id: market.id || market.conditionId || `gamma-spread-${Date.now()}-${Math.random()}`,
+          slug: market.slug,
+          platform: 'Polymarket',
+          title: title,
+          category: market.category || market.marketType || (sport ? sport.name : 'General'),
+          teams: outcomes,
+          yesPrice: yesPrice,
+          noPrice: noPrice,
+          volume: parseFloat(market.volumeNum || market.volume || 0),
+          liquidity: parseFloat(market.liquidityNum || market.liquidity || 0),
+          url: market.slug ? `https://polymarket.com/event/${market.slug}` :
+               market.id ? `https://polymarket.com/market/${market.id}` :
+               'https://polymarket.com',
+          lastUpdate: new Date().toISOString(),
+          active: market.active !== false,
+          endDate: market.endDate || market.end_date_iso,
+          sport: sport?.id,
+          marketType: 'spread',
+          line: line,
+        });
+
+      } catch (error) {
+        log(`Error processing Gamma spread market: ${error}`, null, 'error');
+      }
+    }
+
+    log(`✅ Processed ${processedMarkets.length} valid spread markets from Gamma API`, null, 'success');
     return processedMarkets;
   }
 

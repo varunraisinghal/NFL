@@ -29,6 +29,12 @@ const MarketListScreen = () => {
   const [groupedGames, setGroupedGames] = useState<GroupedGame[]>([]);
   const [selectedCategory, setSelectedCategory] = useState<string>('All');
   const [sortBy, setSortBy] = useState<'volume' | 'price' | 'title'>('volume');
+  const [selectedTab, setSelectedTab] = useState<'moneylines' | 'spreads'>('moneylines');
+  const [expandedSpreads, setExpandedSpreads] = useState<Set<string>>(new Set());
+
+  // Separate markets by type
+  const moneylineMarkets = markets.filter(m => !m.marketType || m.marketType === 'moneyline');
+  const spreadMarkets = markets.filter(m => m.marketType === 'spread');
 
   // Get unique categories
   const categories = ['All', ...new Set(markets.map(m => m.category || 'General'))];
@@ -132,8 +138,9 @@ const MarketListScreen = () => {
   
   // Filter and sort markets
   useEffect(() => {
-    // Group markets by game for both platforms
-    let grouped = groupMarketsByGame(markets, platform);
+    // Group markets by game for both platforms (only for moneylines)
+    const marketsToGroup = selectedTab === 'moneylines' ? moneylineMarkets : [];
+    let grouped = groupMarketsByGame(marketsToGroup, platform);
 
     // Apply search filter
     if (searchQuery) {
@@ -159,7 +166,7 @@ const MarketListScreen = () => {
     });
 
     setGroupedGames(grouped);
-  }, [searchQuery, selectedCategory, sortBy, markets, platform]);
+  }, [searchQuery, selectedCategory, sortBy, markets, platform, selectedTab]);
   
   const handleGamePress = (game: GroupedGame) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
@@ -168,6 +175,158 @@ const MarketListScreen = () => {
 
   const getPlatformColor = () => {
     return platform === 'Polymarket' ? '#8B5CF6' : '#3B82F6';
+  };
+
+  // Group spread markets by game
+  const groupSpreadsByGame = (spreads: MarketData[]) => {
+    const gameMap = new Map<string, MarketData[]>();
+
+    for (const spread of spreads) {
+      if (spread.teams && spread.teams.length >= 2) {
+        const gameKey = spread.teams.slice(0, 2).sort().join('-');
+        if (!gameMap.has(gameKey)) {
+          gameMap.set(gameKey, []);
+        }
+        gameMap.get(gameKey)!.push(spread);
+      }
+    }
+
+    return gameMap;
+  };
+
+  // Toggle spread expansion
+  const toggleSpreadExpansion = (gameKey: string) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    setExpandedSpreads(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(gameKey)) {
+        newSet.delete(gameKey);
+      } else {
+        newSet.add(gameKey);
+      }
+      return newSet;
+    });
+  };
+
+  // Render individual spread line
+  const renderSpreadLine = (spread: MarketData, formatPrice: (n: number) => string, isMain: boolean = false) => {
+    // Parse the question to determine which team is the favorite for THIS specific line
+    let favoriteTeam = spread.teams[0];
+    let underdogTeam = spread.teams[1];
+
+    const questionMatch = spread.title?.match(/Spread:\s*(\w+(?:\s+\w+)*?)\s*\(/i);
+    if (questionMatch) {
+      const teamInQuestion = questionMatch[1].trim();
+      const team1Match = spread.teams[0].toLowerCase().includes(teamInQuestion.toLowerCase()) ||
+                        teamInQuestion.toLowerCase().includes(spread.teams[0].toLowerCase());
+      const team2Match = spread.teams[1].toLowerCase().includes(teamInQuestion.toLowerCase()) ||
+                        teamInQuestion.toLowerCase().includes(spread.teams[1].toLowerCase());
+
+      if (team1Match) {
+        favoriteTeam = spread.teams[0];
+        underdogTeam = spread.teams[1];
+      } else if (team2Match) {
+        favoriteTeam = spread.teams[1];
+        underdogTeam = spread.teams[0];
+      }
+    }
+
+    const totalVolume = (spread.volume || 0) + (spread.liquidity || 0);
+
+    return (
+      <View key={spread.id} style={styles.spreadRow}>
+        <View style={styles.spreadLineContainer}>
+          <Text style={styles.spreadLineLabel}>
+            Line {spread.line}
+            {totalVolume > 0 && (
+              <Text style={styles.spreadVolume}> (${totalVolume.toLocaleString()})</Text>
+            )}
+          </Text>
+        </View>
+        <View style={styles.spreadTeamsContainer}>
+          <View style={styles.spreadTeamRow}>
+            <Text style={styles.spreadTeamName}>{favoriteTeam} -{spread.line}</Text>
+            <Text style={styles.spreadPrice}>@ {formatPrice(spread.yesPrice)}</Text>
+          </View>
+          <View style={styles.spreadTeamRow}>
+            <Text style={styles.spreadTeamName}>{underdogTeam} +{spread.line}</Text>
+            <Text style={styles.spreadPrice}>@ {formatPrice(spread.noPrice)}</Text>
+          </View>
+        </View>
+      </View>
+    );
+  };
+
+  // Render spread card with collapse/expand
+  const renderSpreadCard = (gameKey: string, spreads: MarketData[]) => {
+    if (spreads.length === 0) return null;
+
+    // Get all teams involved in this game
+    const allTeams = new Set<string>();
+    spreads.forEach(s => s.teams.forEach(t => allTeams.add(t)));
+    const teamNames = Array.from(allTeams);
+
+    const formatPrice = (price: number) => price.toFixed(6);
+
+    // Find the main spread (highest volume/liquidity)
+    const mainSpread = spreads.reduce((max, curr) => {
+      const maxMetric = (max.volume || 0) + (max.liquidity || 0);
+      const currMetric = (curr.volume || 0) + (curr.liquidity || 0);
+      return currMetric > maxMetric ? curr : max;
+    }, spreads[0]);
+
+    const isExpanded = expandedSpreads.has(gameKey);
+    const hasMultipleSpreads = spreads.length > 1;
+    const additionalCount = spreads.length - 1;
+
+    return (
+      <TouchableOpacity
+        key={gameKey}
+        style={[
+          styles.gameCard,
+          hasMultipleSpreads && styles.gameCardTappable
+        ]}
+        onPress={() => hasMultipleSpreads && toggleSpreadExpansion(gameKey)}
+        activeOpacity={hasMultipleSpreads ? 0.7 : 1}
+        disabled={!hasMultipleSpreads}
+      >
+        <View style={styles.gameHeader}>
+          <View style={styles.gameHeaderLeft}>
+            <Text style={styles.gameTitle}>{teamNames.join(' vs ')}</Text>
+            {mainSpread.volume > 0 && (
+              <Text style={styles.gameVolume}>
+                ${(mainSpread.volume + (mainSpread.liquidity || 0)).toLocaleString()} vol
+              </Text>
+            )}
+          </View>
+          {hasMultipleSpreads && (
+            <View style={styles.spreadIndicator}>
+              <Text style={styles.spreadIndicatorText}>
+                {isExpanded ? 'Show less' : `+${additionalCount} more ${additionalCount === 1 ? 'line' : 'lines'}`}
+              </Text>
+              <Text style={[styles.spreadChevron, isExpanded && styles.spreadChevronUp]}>
+                ▼
+              </Text>
+            </View>
+          )}
+        </View>
+
+        {/* Main spread (always visible) */}
+        {renderSpreadLine(mainSpread, formatPrice)}
+
+        {/* Additional spreads (shown when expanded) */}
+        {isExpanded && spreads
+          .filter(s => s.id !== mainSpread.id)
+          .map(spread => renderSpreadLine(spread, formatPrice))
+        }
+
+        {spreads[0].endDate && (
+          <Text style={styles.endDate}>
+            Ends: {new Date(spreads[0].endDate).toLocaleDateString()}
+          </Text>
+        )}
+      </TouchableOpacity>
+    );
   };
 
   // Render unified game card with full decimal precision
@@ -240,10 +399,40 @@ const MarketListScreen = () => {
       >
         <Text style={styles.headerTitle}>{platform} Markets</Text>
         <Text style={styles.headerSubtitle}>
-          {groupedGames.length} games
+          {selectedTab === 'moneylines' ? groupedGames.length : spreadMarkets.length} markets
         </Text>
       </LinearGradient>
-      
+
+      {/* Tab Selector - Show for both platforms if spreads are available */}
+      {(spreadMarkets.length > 0) && (
+        <View style={styles.tabContainer}>
+          <TouchableOpacity
+            style={[
+              styles.tab,
+              selectedTab === 'moneylines' && styles.tabActive,
+              selectedTab === 'moneylines' && platform === 'Kalshi' && { backgroundColor: '#3B82F6' }
+            ]}
+            onPress={() => setSelectedTab('moneylines')}
+          >
+            <Text style={[styles.tabText, selectedTab === 'moneylines' && styles.tabTextActive]}>
+              Moneylines
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[
+              styles.tab,
+              selectedTab === 'spreads' && styles.tabActive,
+              selectedTab === 'spreads' && platform === 'Kalshi' && { backgroundColor: '#3B82F6' }
+            ]}
+            onPress={() => setSelectedTab('spreads')}
+          >
+            <Text style={[styles.tabText, selectedTab === 'spreads' && styles.tabTextActive]}>
+              Spreads
+            </Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
       <View style={styles.controls}>
         {/* Search Bar */}
         <TextInput
@@ -310,14 +499,73 @@ const MarketListScreen = () => {
         contentContainerStyle={styles.marketListContent}
         showsVerticalScrollIndicator={false}
       >
-        {groupedGames.length > 0 ? (
-          groupedGames.map(game => renderGameCard(game))
+        {selectedTab === 'moneylines' ? (
+          // Render moneylines
+          groupedGames.length > 0 ? (
+            groupedGames.map(game => renderGameCard(game))
+          ) : (
+            <View style={styles.emptyState}>
+              <Text style={styles.emptyStateText}>
+                No moneyline markets found
+              </Text>
+            </View>
+          )
         ) : (
-          <View style={styles.emptyState}>
-            <Text style={styles.emptyStateText}>
-              No games found matching your criteria
-            </Text>
-          </View>
+          // Render spreads
+          (() => {
+            let groupedSpreads = groupSpreadsByGame(spreadMarkets);
+
+            // Apply search filter
+            if (searchQuery) {
+              const filtered = new Map<string, MarketData[]>();
+              for (const [gameKey, spreads] of groupedSpreads.entries()) {
+                const teamNames = Array.from(new Set<string>(spreads.flatMap(s => s.teams)));
+                const matchesSearch = teamNames.some(team =>
+                  team.toLowerCase().includes(searchQuery.toLowerCase())
+                );
+                if (matchesSearch) {
+                  filtered.set(gameKey, spreads);
+                }
+              }
+              groupedSpreads = filtered;
+            }
+
+            // Convert to array for sorting
+            let spreadsArray = Array.from(groupedSpreads.entries());
+
+            // Apply sorting
+            spreadsArray.sort((a, b) => {
+              const [keyA, spreadsA] = a;
+              const [keyB, spreadsB] = b;
+
+              switch (sortBy) {
+                case 'volume':
+                  const volA = Math.max(...spreadsA.map(s => (s.volume || 0) + (s.liquidity || 0)));
+                  const volB = Math.max(...spreadsB.map(s => (s.volume || 0) + (s.liquidity || 0)));
+                  return volB - volA;
+                case 'price':
+                  const priceA = Math.max(...spreadsA.map(s => s.yesPrice));
+                  const priceB = Math.max(...spreadsB.map(s => s.yesPrice));
+                  return priceB - priceA;
+                case 'title':
+                  return keyA.localeCompare(keyB);
+                default:
+                  return 0;
+              }
+            });
+
+            return spreadsArray.length > 0 ? (
+              spreadsArray.map(([gameKey, spreads]) =>
+                renderSpreadCard(gameKey, spreads)
+              )
+            ) : (
+              <View style={styles.emptyState}>
+                <Text style={styles.emptyStateText}>
+                  No spread markets found
+                </Text>
+              </View>
+            );
+          })()
         )}
       </ScrollView>
     </SafeAreaView>
@@ -436,6 +684,14 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#374151',
   },
+  gameCardTappable: {
+    borderColor: '#4B5563',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 2,
+  },
   gameHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -444,6 +700,32 @@ const styles = StyleSheet.create({
     paddingBottom: 12,
     borderBottomWidth: 1,
     borderBottomColor: '#374151',
+  },
+  gameHeaderLeft: {
+    flex: 1,
+    marginRight: 10,
+  },
+  spreadIndicator: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#374151',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 6,
+  },
+  spreadIndicatorText: {
+    fontSize: 12,
+    color: '#9CA3AF',
+    fontWeight: '600',
+  },
+  spreadChevron: {
+    fontSize: 10,
+    color: '#9CA3AF',
+    marginLeft: 2,
+  },
+  spreadChevronUp: {
+    transform: [{ rotate: '180deg' }],
   },
   gameTitle: {
     fontSize: 18,
@@ -509,6 +791,78 @@ const styles = StyleSheet.create({
     color: '#6B7280',
     marginTop: 12,
     paddingTop: 8,
+  },
+  // Tab selector styles
+  tabContainer: {
+    flexDirection: 'row',
+    backgroundColor: '#1F2937',
+    paddingHorizontal: 15,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#374151',
+  },
+  tab: {
+    flex: 1,
+    paddingVertical: 12,
+    alignItems: 'center',
+    borderRadius: 8,
+    marginHorizontal: 5,
+    backgroundColor: '#374151',
+  },
+  tabActive: {
+    backgroundColor: '#8B5CF6',
+  },
+  tabText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#9CA3AF',
+  },
+  tabTextActive: {
+    color: '#FFFFFF',
+  },
+  // Spread display styles
+  spreadRow: {
+    marginBottom: 12,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#374151',
+  },
+  spreadLineContainer: {
+    marginBottom: 8,
+  },
+  spreadLineLabel: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#8B5CF6',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  spreadVolume: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#6B7280',
+    textTransform: 'none',
+  },
+  spreadTeamsContainer: {
+    gap: 8,
+  },
+  spreadTeamRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 6,
+  },
+  spreadTeamName: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#FFFFFF',
+    flex: 1,
+  },
+  spreadPrice: {
+    fontSize: 14,
+    fontWeight: 'bold',
+    color: '#10B981',
+    fontFamily: 'monospace',
   },
 });
 

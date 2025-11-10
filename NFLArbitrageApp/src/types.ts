@@ -20,6 +20,9 @@ export interface MarketData {
   spread?: number;
   totalVolume?: number;
   endDate?: string;
+  // Market type and spread line
+  marketType?: 'moneyline' | 'spread' | 'total';
+  line?: number;  // Spread line (e.g., 7.5) or total points line
 }
 
 export interface Outcome {

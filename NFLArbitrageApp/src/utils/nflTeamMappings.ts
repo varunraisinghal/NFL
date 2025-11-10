@@ -43,29 +43,96 @@ export const NFL_TEAMS: NFLTeam[] = [
 ];
 
 /**
- * Extract team from market title
+ * Calculate Levenshtein distance for fuzzy matching
+ */
+function levenshteinDistance(str1: string, str2: string): number {
+  const len1 = str1.length;
+  const len2 = str2.length;
+  const matrix: number[][] = [];
+
+  for (let i = 0; i <= len1; i++) {
+    matrix[i] = [i];
+  }
+
+  for (let j = 0; j <= len2; j++) {
+    matrix[0][j] = j;
+  }
+
+  for (let i = 1; i <= len1; i++) {
+    for (let j = 1; j <= len2; j++) {
+      if (str1[i - 1] === str2[j - 1]) {
+        matrix[i][j] = matrix[i - 1][j - 1];
+      } else {
+        matrix[i][j] = Math.min(
+          matrix[i - 1][j - 1] + 1,
+          matrix[i][j - 1] + 1,
+          matrix[i - 1][j] + 1
+        );
+      }
+    }
+  }
+
+  return matrix[len1][len2];
+}
+
+/**
+ * Normalize title for better matching
+ */
+function normalizeTitle(title: string): string {
+  return title
+    .toLowerCase()
+    .replace(/[^\w\s]/g, ' ')  // Remove punctuation
+    .replace(/\s+/g, ' ')       // Normalize whitespace
+    .trim();
+}
+
+/**
+ * Extract team from market title with fuzzy matching
  * Works for both Polymarket ("Falcons vs. Colts") and Kalshi ("Atlanta at Indianapolis")
  * IMPORTANT: Returns teams in the order they appear in the title (left to right)
  */
 export function extractTeamsFromTitle(title: string): NFLTeam[] {
-  const titleLower = title.toLowerCase();
-  const foundTeams: { team: NFLTeam; position: number }[] = [];
+  const titleNormalized = normalizeTitle(title);
+  const foundTeams: { team: NFLTeam; position: number; confidence: number }[] = [];
 
   for (const team of NFL_TEAMS) {
+    let bestMatch: { position: number; confidence: number } | null = null;
+
     for (const alias of team.aliases) {
-      // Use word boundaries to avoid false matches like "la" in "las vegas"
-      // Escape special regex characters in the alias
+      // Exact match with word boundaries
       const escapedAlias = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const pattern = new RegExp(`\\b${escapedAlias}\\b`, 'i');
+      const match = pattern.exec(titleNormalized);
 
-      const match = pattern.exec(titleLower);
       if (match) {
-        // Avoid duplicates
-        if (!foundTeams.find(ft => ft.team.abbr === team.abbr)) {
-          foundTeams.push({ team, position: match.index });
-          break;
+        bestMatch = { position: match.index, confidence: 1.0 };
+        break;
+      }
+
+      // Fuzzy match for typos (only for longer aliases to avoid false positives)
+      if (alias.length >= 5) {
+        const words = titleNormalized.split(' ');
+        for (let i = 0; i < words.length; i++) {
+          const word = words[i];
+          if (word.length >= 4) {
+            const distance = levenshteinDistance(alias, word);
+            const maxDistance = Math.max(2, Math.floor(alias.length * 0.2)); // 20% threshold
+
+            if (distance <= maxDistance) {
+              const confidence = 1 - (distance / alias.length);
+              const position = titleNormalized.indexOf(word);
+
+              if (!bestMatch || confidence > bestMatch.confidence) {
+                bestMatch = { position, confidence };
+              }
+            }
+          }
         }
       }
+    }
+
+    if (bestMatch && !foundTeams.find(ft => ft.team.abbr === team.abbr)) {
+      foundTeams.push({ team, position: bestMatch.position, confidence: bestMatch.confidence });
     }
   }
 
