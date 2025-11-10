@@ -285,7 +285,7 @@ const MainScreen = () => {
   }, [fetchAllMarkets]);
   
   // Get gradient colors based on profit margin
-  const getGradientColors = (profit: number): string[] => {
+  const getGradientColors = (profit: number): [string, string] => {
     if (profit >= 5) return ['#10B981', '#059669'];
     if (profit >= 3) return ['#3B82F6', '#2563EB'];
     return ['#8B5CF6', '#7C3AED'];

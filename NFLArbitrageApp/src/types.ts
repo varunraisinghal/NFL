@@ -68,6 +68,26 @@ export interface MatchedMarket {
   matchTitle: string;
 }
 
+// Grouped Kalshi game (two markets for same game)
+export interface KalshiGroupedGame {
+  gameTitle: string;
+  team1: {
+    name: string;
+    abbr: string;
+    yesPrice: number;
+    noPrice: number;
+  };
+  team2: {
+    name: string;
+    abbr: string;
+    yesPrice: number;
+    noPrice: number;
+  };
+  volume: number;
+  endDate?: string;
+  url: string;
+}
+
 // Navigation types for React Navigation
 export type RootStackParamList = {
   Main: undefined;

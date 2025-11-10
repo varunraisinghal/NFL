@@ -14,8 +14,9 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as Haptics from 'expo-haptics';
 import { useRoute, RouteProp, useNavigation } from '@react-navigation/native';
-import { MarketData } from '../types';
+import { MarketData, KalshiGroupedGame } from '../types';
 import { RootStackParamList } from '../../App';
+import { extractTeamsFromTitle } from '../utils/nflTeamMappings';
 
 type MarketListRouteProp = RouteProp<RootStackParamList, 'MarketList'>;
 
@@ -23,50 +24,138 @@ const MarketListScreen = () => {
   const route = useRoute<MarketListRouteProp>();
   const navigation = useNavigation();
   const { markets, platform } = route.params;
-  
+
   const [searchQuery, setSearchQuery] = useState('');
   const [filteredMarkets, setFilteredMarkets] = useState<MarketData[]>(markets);
+  const [groupedKalshiGames, setGroupedKalshiGames] = useState<KalshiGroupedGame[]>([]);
   const [selectedCategory, setSelectedCategory] = useState<string>('All');
   const [sortBy, setSortBy] = useState<'volume' | 'price' | 'title'>('volume');
-  
+
   // Get unique categories
   const categories = ['All', ...new Set(markets.map(m => m.category || 'General'))];
+
+  // Group Kalshi markets by game
+  const groupKalshiMarkets = (kalshiMarkets: MarketData[]): KalshiGroupedGame[] => {
+    const gameMap = new Map<string, MarketData[]>();
+
+    // Group markets by game
+    for (const market of kalshiMarkets) {
+      const teams = extractTeamsFromTitle(market.title);
+      if (teams.length === 2) {
+        const gameKey = [teams[0].abbr, teams[1].abbr].sort().join('-');
+        if (!gameMap.has(gameKey)) {
+          gameMap.set(gameKey, []);
+        }
+        gameMap.get(gameKey)!.push(market);
+      }
+    }
+
+    // Convert to grouped games
+    const groupedGames: KalshiGroupedGame[] = [];
+    for (const [gameKey, gameMarkets] of gameMap.entries()) {
+      if (gameMarkets.length === 2) {
+        const teams = extractTeamsFromTitle(gameMarkets[0].title);
+
+        // Find which market belongs to which team
+        const team1Market = gameMarkets.find(m =>
+          m.teams && m.teams.length > 0 && m.teams[0].toUpperCase() === teams[0].abbr.toUpperCase()
+        );
+        const team2Market = gameMarkets.find(m =>
+          m.teams && m.teams.length > 0 && m.teams[0].toUpperCase() === teams[1].abbr.toUpperCase()
+        );
+
+        if (team1Market && team2Market) {
+          groupedGames.push({
+            gameTitle: `${teams[0].name} vs ${teams[1].name}`,
+            team1: {
+              name: teams[0].name,
+              abbr: teams[0].abbr,
+              yesPrice: team1Market.yesPrice,
+              noPrice: team1Market.noPrice,
+            },
+            team2: {
+              name: teams[1].name,
+              abbr: teams[1].abbr,
+              yesPrice: team2Market.yesPrice,
+              noPrice: team2Market.noPrice,
+            },
+            volume: team1Market.volume + team2Market.volume,
+            endDate: team1Market.endDate,
+            url: team1Market.url,
+          });
+        }
+      }
+    }
+
+    return groupedGames;
+  };
   
   // Filter and sort markets
   useEffect(() => {
-    let filtered = [...markets];
-    
-    // Apply search filter
-    if (searchQuery) {
-      filtered = filtered.filter(market =>
-        market.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        (market.category?.toLowerCase().includes(searchQuery.toLowerCase()))
-      );
-    }
-    
-    // Apply category filter
-    if (selectedCategory !== 'All') {
-      filtered = filtered.filter(market => 
-        (market.category || 'General') === selectedCategory
-      );
-    }
-    
-    // Apply sorting
-    filtered.sort((a, b) => {
-      switch (sortBy) {
-        case 'volume':
-          return b.volume - a.volume;
-        case 'price':
-          return b.yesPrice - a.yesPrice;
-        case 'title':
-          return a.title.localeCompare(b.title);
-        default:
-          return 0;
+    if (platform === 'Kalshi') {
+      // Group Kalshi markets by game
+      let grouped = groupKalshiMarkets(markets);
+
+      // Apply search filter
+      if (searchQuery) {
+        grouped = grouped.filter(game =>
+          game.gameTitle.toLowerCase().includes(searchQuery.toLowerCase()) ||
+          game.team1.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+          game.team2.name.toLowerCase().includes(searchQuery.toLowerCase())
+        );
       }
-    });
-    
-    setFilteredMarkets(filtered);
-  }, [searchQuery, selectedCategory, sortBy, markets]);
+
+      // Apply sorting
+      grouped.sort((a, b) => {
+        switch (sortBy) {
+          case 'volume':
+            return b.volume - a.volume;
+          case 'price':
+            return b.team1.yesPrice - a.team1.yesPrice;
+          case 'title':
+            return a.gameTitle.localeCompare(b.gameTitle);
+          default:
+            return 0;
+        }
+      });
+
+      setGroupedKalshiGames(grouped);
+    } else {
+      // Polymarket - use normal market filtering
+      let filtered = [...markets];
+
+      // Apply search filter
+      if (searchQuery) {
+        filtered = filtered.filter(market =>
+          market.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
+          (market.category?.toLowerCase().includes(searchQuery.toLowerCase()))
+        );
+      }
+
+      // Apply category filter
+      if (selectedCategory !== 'All') {
+        filtered = filtered.filter(market =>
+          (market.category || 'General') === selectedCategory
+        );
+      }
+
+      // Apply sorting
+      filtered.sort((a, b) => {
+        switch (sortBy) {
+          case 'volume':
+            return b.volume - a.volume;
+          case 'price':
+            return b.yesPrice - a.yesPrice;
+          case 'title':
+            return a.title.localeCompare(b.title);
+          default:
+            return 0;
+        }
+      });
+
+      setFilteredMarkets(filtered);
+    }
+  }, [searchQuery, selectedCategory, sortBy, markets, platform]);
   
   const handleMarketPress = (market: MarketData) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
@@ -74,11 +163,75 @@ const MarketListScreen = () => {
     // You could navigate to a detail screen or open the URL
     console.log('Market pressed:', market.title);
   };
-  
+
+  const handleKalshiGamePress = (game: KalshiGroupedGame) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    console.log('Game pressed:', game.gameTitle);
+  };
+
   const getPlatformColor = () => {
     return platform === 'Polymarket' ? '#8B5CF6' : '#3B82F6';
   };
-  
+
+  // Render grouped Kalshi game card (like Kalshi website)
+  const renderKalshiGameCard = (game: KalshiGroupedGame) => {
+    return (
+      <TouchableOpacity
+        key={game.gameTitle}
+        style={styles.kalshiGameCard}
+        onPress={() => handleKalshiGamePress(game)}
+        activeOpacity={0.7}
+      >
+        <View style={styles.kalshiGameHeader}>
+          <Text style={styles.kalshiGameTitle}>{game.gameTitle}</Text>
+          {game.volume > 0 && (
+            <Text style={styles.kalshiVolume}>${game.volume.toLocaleString()} vol</Text>
+          )}
+        </View>
+
+        {/* Team 1 */}
+        <View style={styles.kalshiTeamRow}>
+          <View style={styles.kalshiTeamInfo}>
+            <Text style={styles.kalshiTeamName}>{game.team1.name}</Text>
+          </View>
+          <View style={styles.kalshiPricesRow}>
+            <View style={styles.kalshiPriceBox}>
+              <Text style={styles.kalshiPriceLabel}>Yes</Text>
+              <Text style={styles.kalshiYesPrice}>{(game.team1.yesPrice * 100).toFixed(0)}¢</Text>
+            </View>
+            <View style={styles.kalshiPriceBox}>
+              <Text style={styles.kalshiPriceLabel}>No</Text>
+              <Text style={styles.kalshiNoPrice}>{(game.team1.noPrice * 100).toFixed(0)}¢</Text>
+            </View>
+          </View>
+        </View>
+
+        {/* Team 2 */}
+        <View style={styles.kalshiTeamRow}>
+          <View style={styles.kalshiTeamInfo}>
+            <Text style={styles.kalshiTeamName}>{game.team2.name}</Text>
+          </View>
+          <View style={styles.kalshiPricesRow}>
+            <View style={styles.kalshiPriceBox}>
+              <Text style={styles.kalshiPriceLabel}>Yes</Text>
+              <Text style={styles.kalshiYesPrice}>{(game.team2.yesPrice * 100).toFixed(0)}¢</Text>
+            </View>
+            <View style={styles.kalshiPriceBox}>
+              <Text style={styles.kalshiPriceLabel}>No</Text>
+              <Text style={styles.kalshiNoPrice}>{(game.team2.noPrice * 100).toFixed(0)}¢</Text>
+            </View>
+          </View>
+        </View>
+
+        {game.endDate && (
+          <Text style={styles.kalshiEndDate}>
+            Ends: {new Date(game.endDate).toLocaleDateString()}
+          </Text>
+        )}
+      </TouchableOpacity>
+    );
+  };
+
   const renderMarketCard = (market: MarketData) => {
     const impliedYesProb = (market.yesPrice * 100).toFixed(1);
     const impliedNoProb = (market.noPrice * 100).toFixed(1);
@@ -136,7 +289,11 @@ const MarketListScreen = () => {
         style={styles.header}
       >
         <Text style={styles.headerTitle}>{platform} Markets</Text>
-        <Text style={styles.headerSubtitle}>{markets.length} total markets</Text>
+        <Text style={styles.headerSubtitle}>
+          {platform === 'Kalshi'
+            ? `${groupedKalshiGames.length} games`
+            : `${markets.length} markets`}
+        </Text>
       </LinearGradient>
       
       <View style={styles.controls}>
@@ -205,14 +362,26 @@ const MarketListScreen = () => {
         contentContainerStyle={styles.marketListContent}
         showsVerticalScrollIndicator={false}
       >
-        {filteredMarkets.length > 0 ? (
-          filteredMarkets.map(market => renderMarketCard(market))
+        {platform === 'Kalshi' ? (
+          groupedKalshiGames.length > 0 ? (
+            groupedKalshiGames.map(game => renderKalshiGameCard(game))
+          ) : (
+            <View style={styles.emptyState}>
+              <Text style={styles.emptyStateText}>
+                No games found matching your criteria
+              </Text>
+            </View>
+          )
         ) : (
-          <View style={styles.emptyState}>
-            <Text style={styles.emptyStateText}>
-              No markets found matching your criteria
-            </Text>
-          </View>
+          filteredMarkets.length > 0 ? (
+            filteredMarkets.map(market => renderMarketCard(market))
+          ) : (
+            <View style={styles.emptyState}>
+              <Text style={styles.emptyStateText}>
+                No markets found matching your criteria
+              </Text>
+            </View>
+          )
         )}
       </ScrollView>
     </SafeAreaView>
@@ -400,6 +569,86 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: '#9CA3AF',
     textAlign: 'center',
+  },
+  // Kalshi grouped game card styles
+  kalshiGameCard: {
+    backgroundColor: '#1F2937',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#374151',
+  },
+  kalshiGameHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 16,
+    paddingBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#374151',
+  },
+  kalshiGameTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#FFFFFF',
+    flex: 1,
+  },
+  kalshiVolume: {
+    fontSize: 13,
+    color: '#9CA3AF',
+    marginLeft: 10,
+  },
+  kalshiTeamRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#374151',
+  },
+  kalshiTeamInfo: {
+    flex: 1,
+  },
+  kalshiTeamName: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#FFFFFF',
+  },
+  kalshiPricesRow: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  kalshiPriceBox: {
+    alignItems: 'center',
+    backgroundColor: '#111827',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 8,
+    minWidth: 70,
+  },
+  kalshiPriceLabel: {
+    fontSize: 11,
+    color: '#9CA3AF',
+    marginBottom: 4,
+    textTransform: 'uppercase',
+    fontWeight: '600',
+  },
+  kalshiYesPrice: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#10B981',
+  },
+  kalshiNoPrice: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#EF4444',
+  },
+  kalshiEndDate: {
+    fontSize: 12,
+    color: '#6B7280',
+    marginTop: 12,
+    paddingTop: 8,
   },
 });
 
